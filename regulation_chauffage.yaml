@@ -1,0 +1,427 @@
+esphome:
+  name: regulation-chauffage
+  friendly_name: regulation-chauffage
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "x"
+ota:
+  platform: esphome
+  password: "x"
+
+wifi:
+  ssid: SweetHomeR&F
+  password: !secret wifi_password
+  manual_ip:
+    static_ip: x.x.x.x
+    gateway: x.x.x.x
+    subnet: 255.255.255.0
+    dns1: x.x.x.x
+    dns2: 8.8.8.8
+  power_save_mode: none
+  passive_scan: true
+  reboot_timeout: 1min
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Regulation-Chauffage"
+    password: "x"
+
+captive_portal:
+
+#**************************************
+#***********  SUBSTITUTIONS  **********
+#**************************************
+substitutions:
+  delay_v3v_froid: 3s
+  delay_v3v_chaud: 3s
+  delay_update_dallas: 30s
+
+
+#**************************************
+#**********  GLOBALS VALUES  **********
+#**************************************
+globals:
+   - id: total_declenchement_bruleur
+     type: int
+     restore_value: True
+     initial_value: '0'
+
+
+binary_sensor:  
+  - platform: status
+    name: "Regulation Status"
+
+
+text_sensor:
+  - platform: version
+    name: "ESPHome Version" 
+
+
+# CONFIGURATION DE L'ENTREE POUR PLUSIEUR SONDE DE TEMPERATURE
+one_wire:
+  - platform: gpio                                                                                     
+    pin: GPIO18
+
+#**************************************
+#**************  SENSOR  **************
+#**************************************
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 15min
+
+# AFFICHAGE DU NOMBRE DE DECLENCHEMENT DU BRULEUR
+  - platform: template
+    name: "Declenchement bruleur"
+    update_interval: 300s # 5min
+    lambda: return id(total_declenchement_bruleur);
+    accuracy_decimals: 0
+
+   
+#**************************************
+#*******  SONDE DE TEMPERATURE  *******
+#**************************************
+  - platform: dallas_temp
+    address: 0x293cc0e381de2828
+    name: "Temperature ballon"
+    id: temperature_ballon
+    update_interval: ${delay_update_dallas}
+    
+  - platform: dallas_temp
+    address: 0x263c7ae3815cb628
+    name: "Temperature depart chauffage"
+    id: temperature_depart_chauffage
+    update_interval: ${delay_update_dallas}
+    on_value:
+      then:
+        if:
+          condition:
+            - switch.is_off: regulation_off
+          then:
+            # Mode Froid
+            - if:
+                condition:
+                  lambda: return x > id(calcul_loi_eau).state;
+                then:
+                  - logger.log: "****************************** Mode Froid **********************************"
+                  - logger.log: 
+                      format: "Température de départ supérieur à la valeur de la loi d'eau %.1f"
+                      args: [id(temperature_depart_chauffage).state]
+                  - switch.turn_on: v3v_froid
+                  - logger.log: "****************************************************************************"
+
+
+            # Mode Chaud
+            - if:
+                condition:
+                  lambda: return x < id(calcul_loi_eau).state;
+                then:
+                  - logger.log: "****************************** Mode Chaud **********************************"
+                  - logger.log: 
+                      format: "Température de départ inférieur à la valeur de la loi d'eau %.1f"
+                      args: [id(temperature_depart_chauffage).state]
+                  - switch.turn_on: v3v_chaud
+                  - logger.log: "****************************************************************************"
+
+
+
+  - platform: dallas_temp
+    address: 0x333cb0e381d05128
+    name: "Temperature chaudiere"
+    update_interval: ${delay_update_dallas}
+    id: temperature_chaudiere
+    on_value_range:
+      - above: 80.0
+        then:
+          - lambda: |-
+              id(total_declenchement_bruleur) += 1;
+    filters:
+      - offset: 8
+      - round: 1
+
+  - platform: dallas_temp
+    address: 0xf70120600d5b5728
+    name: "Temperature chauffage exterieur"
+    update_interval: ${delay_update_dallas}
+    id: temperature_exterieur
+    filters:
+      - round: 1
+
+  - platform: homeassistant
+    name: temperature_salon
+    id: temperature_salon
+    entity_id: sensor.temperature_salon
+    filters:
+      - round: 1
+
+  - platform: homeassistant
+    name: temperature_exterieur_ombre
+    id: temperature_exterieur_ombre
+    entity_id: sensor.temperature_exterieur
+    filters:
+      - round: 1
+
+  - platform: homeassistant
+    name: trend_baissiere
+    id: trend_baissiere
+    entity_id: binary_sensor.trend_temperature_baisse_maison
+
+  - platform: homeassistant
+    name: temperature_forecast_four_hour
+    id: temperature_forecast_four_hour
+    entity_id: sensor.temperature_forecast_next_hour
+
+#La loi d'eau est une courbe qui est crée en fonction d'une pente et d'une parallèle
+# Plus d'info sur le NOTION
+# Calcul loi d'eau (θeau - θamb) = p * (θref – θext) -> utilisé pour la consigne envoie chaud
+#θeau la température d’eau chaude
+#θref température de réf mis plus basse que la temperature ambiante pour tenir compte du soleil et autre
+#θamb la température ambiante fixée par la consigne du thermostat
+#θext la température extérieure
+#p  la pente.
+# Lien : https://fr.wikipedia.org/wiki/Loi_d%27eau
+# return id(temperature_ambiante).state + (id(pente_slider).state * (id(temperature_ambiante).state - 4)) - id(temperature_exterieur).state);
+
+      # return id(pente_chauffage).state * (id(temperature_ambiante).state - id(temperature_exterieur).state) + id(parallele_chauffage).state;
+
+##################### A tester
+#     if(id(temperature_exterieur).state && id(temperature_exterieur_ombre)){
+#        float loi_eau = id(pente_chauffage).state * (id(temperature_ambiante).state - (id(temperature_exterieur).state + id(temperature_exterieur_ombre).state) / 2 ) + id(parallele_chauffage).state;
+#      }
+#      elseif(id(temperature_exterieur).state)
+#      {
+#        float loi_eau = id(pente_chauffage).state * (id(temperature_ambiante).state - id(temperature_exterieur).state) + id(parallele_chauffage).state;
+#      }
+#      else
+#      {
+#        float loi_eau = id(pente_chauffage).state * (id(temperature_ambiante).state - id(temperature_exterieur_ombre).state) + id(parallele_chauffage).state;
+#      }
+
+
+  - platform: template
+    name: "Loi d'eau"
+    unit_of_measurement: "°C"
+    device_class: "temperature"
+    state_class: "measurement"
+    id: calcul_loi_eau
+    filters:
+      - round: 1
+    update_interval: 30s
+
+    lambda: |-
+      // if(isnan(id(temperature_exterieur_ombre).state))
+      // {
+      //   float loi_eau = id(pente_chauffage).state * (id(temperature_ambiante).state - id(temperature_exterieur).state) + id(parallele_chauffage).state;
+      //   if(loi_eau < 55){
+      //     return loi_eau;
+      //   }
+      //   else{
+      //     return 30;
+      //   }
+      // }
+      // else{
+      //   float loi_eau = id(pente_chauffage).state * (id(temperature_ambiante).state - (id(temperature_exterieur).state + id(temperature_exterieur_ombre).state + id(temperature_forecast_four_hour).state) / 3 ) + id(parallele_chauffage).state;
+      //   if(loi_eau < 55){
+      //     return loi_eau;
+      //   }
+      //   else{
+      //     return 30;
+      //   }
+      // }
+
+      
+      float loi_eau;
+      if (isnan(id(temperature_exterieur_ombre).state)) {
+        loi_eau = id(pente_chauffage).state * (id(temperature_ambiante).state - id(temperature_exterieur).state) + id(parallele_chauffage).state;
+      } else {
+        loi_eau = id(pente_chauffage).state * (id(temperature_ambiante).state - (id(temperature_exterieur).state + id(temperature_exterieur_ombre).state + id(temperature_forecast_four_hour).state) / 3) + id(parallele_chauffage).state;
+      }
+
+      return clamp(loi_eau, 20.0f, 55.0f);
+
+number:
+  - platform: template
+    name: "Pente chauffage"
+    id: pente_chauffage
+    optimistic: true
+    step: 0.1
+    min_value: 0
+    max_value: 3
+    mode: slider
+    restore_value: true
+
+
+  - platform: template
+    name: "Temperature ambiante"
+    id: temperature_ambiante
+    step: 0.1
+    initial_value: 20.2
+    min_value: 15
+    max_value: 25
+    optimistic: true
+    restore_value: true
+    mode: BOX
+
+  - platform: template
+    name: "Parallele chaufage"
+    id: parallele_chauffage
+    step: 1
+    initial_value: 19
+    min_value: 15
+    max_value: 25
+    optimistic: true
+    restore_value: true
+    mode: BOX
+  
+
+switch:
+
+  - platform: template
+    name: "Off Regulation"
+    id: regulation_off
+    optimistic: true
+
+  - platform: gpio
+    internal: true
+    pin:
+      number: GPIO19
+      inverted: true
+    id: v3v_alimentation
+
+  - platform: gpio
+    pin:
+      number: GPIO21
+      inverted: true
+    internal: true
+    id: v3v
+
+
+# Branchement sur le NC du Relai.
+  - platform: gpio
+    pin:
+      number: GPIO23
+    name: "Chaudiere"
+    id: chaudiere
+    restore_mode: ALWAYS_ON
+
+#**************************************
+#***********  CIRCULATEUR  ************
+#**************************************
+
+# Branchement sur le NC du Relai.
+  - platform: gpio
+    pin:
+      number: GPIO22
+    name: "Circulateur"
+    id: circulateur
+    restore_mode: ALWAYS_ON
+
+
+#**************************************
+#************  V3V REPOS  *************
+#**************************************
+  - platform: template
+    id: v3v_repos
+    name: "Repos V3V"
+    icon: "mdi:pool"
+    turn_on_action:
+      then:
+        - switch.turn_off: v3v_alimentation
+
+
+#**************************************
+#************  V3V FROID  *************
+#**************************************      
+  - platform: template
+    id: v3v_froid
+    name: "V3V Froid"
+    icon: "mdi:pool"
+    turn_on_action:
+      then:
+        if:
+          condition:
+            switch.is_off: regulation_off
+          then:
+            #- logger.log: "Mode froid"
+            - switch.turn_on: v3v
+            - delay: 500ms
+            - switch.turn_on: v3v_alimentation
+            - delay: ${delay_v3v_froid}
+            - switch.turn_off: v3v_alimentation
+            - delay: 500ms
+            - switch.turn_off: v3v
+
+
+#**************************************
+#************  V3V CHAUD  *************
+#**************************************
+  - platform: template
+    id: v3v_chaud
+    name: "V3V Chaud"
+    icon: "mdi:pool"
+    turn_on_action:
+      then:
+        if:
+          condition:
+            switch.is_off: regulation_off
+          then:
+            #- logger.log: "Mode chaud"
+            - switch.turn_on: v3v_alimentation
+            - delay: ${delay_v3v_chaud}
+            - switch.turn_off: v3v_alimentation
+
+
+button:
+  - platform: template
+    name: "Reset déclenchement bruleur"
+    id: reset_declenchement_bruleur
+    icon: "mdi:alert-remove-outline"
+    on_press: 
+      then:
+        - lambda: |-
+              id(total_declenchement_bruleur) = 0;
+            
+
+
+#**************************************
+#********  Baisse de la pente  ********
+#**************************************
+interval:
+  - interval: 48h
+    then:
+      if:
+        condition:
+          - switch.is_off: regulation_off
+        then:
+          - if:
+              condition:
+                - lambda: |-
+                    return ((id(temperature_salon).state - id(temperature_ambiante).state < 2) && (id(temperature_salon).state - id(temperature_ambiante).state >= 0.2) && (id(pente_chauffage).state > 0.4) && (id(trend_baissiere).state != true));
+              then:
+                - logger.log: "*************************** Pente chauffage**********************************"
+                - logger.log: 
+                      format: "Delta Température salon ambiante %.1f. Décrementation activé."
+                      args: [ 'id(temperature_salon).state - id(temperature_ambiante).state']
+                - number.decrement: pente_chauffage
+                - logger.log: "****************************************************************************"
+          - if:
+              condition:
+                - lambda: |-
+                    return ((id(temperature_salon).state - id(temperature_ambiante).state > -2) && (-0.2 >= (id(temperature_salon).state - id(temperature_ambiante).state)) && (id(pente_chauffage).state < 1.5));
+              then:
+                - logger.log: "*************************** Pente chauffage**********************************"
+                - logger.log: 
+                      format: "Delta Température salon ambiante %.1f. Incrementation activé."
+                      args: [ 'id(temperature_salon).state - id(temperature_ambiante).state']
+                - number.increment: pente_chauffage
+                - logger.log: "****************************************************************************"
