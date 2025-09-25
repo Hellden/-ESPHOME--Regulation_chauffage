@@ -1,5 +1,4 @@
-# -ESPHOME--Regulation_chauffage[DefiDIY25] Gestion d'une chaufferie
-[DefiDIY25] Gestion d'une chaufferie
+# [ESPHOME]- Gestion chaufferie
 Bonjour à tous,
 
 Voici mon projet de gestion de chaufferie. Actuellement je possède une chaufferie qui comprend une chaudière bois/granulé avec vanne 4 voies + ballon tampons avec production d’eau chaude.
